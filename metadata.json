@@ -1,0 +1,7 @@
+{
+  "name": "Cherry Buy Buy",
+  "description": "A mobile-first order management and bookkeeping app with real-time Firebase synchronization.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
