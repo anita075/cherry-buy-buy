@@ -40,7 +40,10 @@ import {
   Store,
   Calculator,
   ArrowRightLeft,
-  Percent
+  Percent,
+  TrendingUp,
+  TrendingDown,
+  Coins
 } from 'lucide-react';
 import { 
   Order, 
@@ -86,14 +89,6 @@ const App: React.FC = () => {
 
   const [selectedOperator, setSelectedOperator] = useState<string>(() => {
     return localStorage.getItem('selectedOperator') || '';
-  });
-
-  // Pricing Calculator State
-  const [calcForm, setCalcForm] = useState({
-    foreignPrice: 0,
-    rate: 0,
-    margin: 30, // Default 30% margin
-    finalPrice: 0
   });
 
   const [rateForm, setRateForm] = useState({
@@ -154,8 +149,13 @@ const App: React.FC = () => {
   const unpaidCount = useMemo(() => activeOrders.filter(o => !o.status.isPaid).length, [activeOrders]);
   const unshippedCount = useMemo(() => activeOrders.filter(o => o.status.isProcessed && !o.status.isShipped).length, [activeOrders]);
 
-  const receivedAmount = useMemo(() => activeOrders.filter(o => o.status.isPaid).reduce((acc, o) => acc + o.totalAmount + (o.shippingFee || 0), 0), [activeOrders]);
   const pendingAmount = useMemo(() => activeOrders.filter(o => !o.status.isPaid).reduce((acc, o) => acc + o.totalAmount + (o.shippingFee || 0), 0), [activeOrders]);
+
+  const currentActiveRate = useMemo(() => {
+    const today = new Date().toISOString().split('T')[0];
+    return exchangeRates.find(r => r.date === today && r.currency === selectedCurrency) || 
+           exchangeRates.find(r => r.currency === selectedCurrency);
+  }, [exchangeRates, selectedCurrency]);
 
   const productStats = useMemo(() => {
     const stats: Record<string, { totalQty: number, buyers: Set<string>, orders: Order[], totalSellingPrice: number, totalPurchasedCost: number }> = {};
@@ -169,20 +169,15 @@ const App: React.FC = () => {
         stats[name].totalQty += item.qty;
         stats[name].buyers.add(order.customer);
         stats[name].totalSellingPrice += (item.qty * item.price);
-        // Cost = Foreign Price * Rate
-        const itemPurchaseCost = (item.purchases || []).reduce((sum, p) => sum + (p.qty * (p.foreignPrice * (p.rate || 1))), 0);
+        
+        // Final Profit calc based on manual purchase record: TWD Cost = Foreign Price / Rate
+        const itemPurchaseCost = (item.purchases || []).reduce((sum, p) => sum + (p.qty * (p.foreignPrice / (p.rate || 1))), 0);
         stats[name].totalPurchasedCost += itemPurchaseCost;
         if (!stats[name].orders.find(o => o.id === order.id)) stats[name].orders.push(order);
       });
     });
     return Object.entries(stats).sort((a, b) => b[1].totalQty - a[1].totalQty);
   }, [activeOrders, masterProducts]);
-
-  const currentActiveRate = useMemo(() => {
-    const today = new Date().toISOString().split('T')[0];
-    return exchangeRates.find(r => r.date === today && r.currency === selectedCurrency) || 
-           exchangeRates.find(r => r.currency === selectedCurrency);
-  }, [exchangeRates, selectedCurrency]);
 
   const { filteredOrders, searchStats } = useMemo(() => {
     const queryToUse = searchQuery.trim().toLowerCase();
@@ -212,7 +207,7 @@ const App: React.FC = () => {
     return 0;
   };
 
-  const calculateItemCost = (purchases: PurchaseRecord[]) => (purchases || []).reduce((sum, p) => sum + (p.qty * (p.foreignPrice * (p.rate || 1))), 0);
+  const calculateItemCost = (purchases: PurchaseRecord[]) => (purchases || []).reduce((sum, p) => sum + (p.qty * (p.foreignPrice / (p.rate || 1))), 0);
 
   const toggleOrderStatus = async (e: React.MouseEvent, orderId: string, field: keyof OrderStatus) => {
     e.stopPropagation();
@@ -274,11 +269,14 @@ const App: React.FC = () => {
   const handlePurchasedPlus = (idx: number) => {
     const items = [...(newOrder.items || [])];
     const item = items[idx];
-    if (item.purchases && item.purchases.length > 0) {
-      item.purchases[0].qty++;
-      item.cost = calculateItemCost(item.purchases);
-      setNewOrder({ ...newOrder, items });
+    if (!item.purchases) item.purchases = [];
+    if (item.purchases.length === 0) {
+        const rate = getRateForPayment(currentActiveRate, item.paymentType);
+        item.purchases.push({ qty: 0, rate: rate || 1, foreignPrice: 0, paymentType: item.paymentType, date: new Date().toISOString().split('T')[0] });
     }
+    item.purchases[0].qty++;
+    item.cost = calculateItemCost(item.purchases);
+    setNewOrder({ ...newOrder, items });
   };
 
   const openAddOrderModal = () => {
@@ -295,38 +293,60 @@ const App: React.FC = () => {
     setIsModalOpen(true);
   };
 
-  const openEditOrderModal = (order: Order) => { editingOrderId !== order.id && setEditingOrderId(order.id); setNewOrder({ ...order }); setIsModalOpen(true); };
+  const openEditOrderModal = (order: Order) => { 
+    setEditingOrderId(order.id); 
+    setNewOrder({ ...order }); 
+    setIsModalOpen(true); 
+  };
 
   const handleSaveOrder = async () => {
     if (!selectedOperator) return alert('請先選擇操作人員');
     if (!newOrder.customer?.trim()) return alert('請輸入買家姓名');
+    
     const items = newOrder.items || [];
-    const allProcessed = items.length > 0 && items.every(item => (item.purchases || []).reduce((s, p) => s + p.qty, 0) >= item.qty);
+    // Auto-process logic: all items must have purchased qty >= total qty
+    const allProcessed = items.length > 0 && items.every(item => {
+      const purchasedQty = (item.purchases || []).reduce((s, p) => s + p.qty, 0);
+      return purchasedQty >= item.qty && item.qty > 0;
+    });
+
     const subtotal = items.reduce((acc, i) => acc + (i.qty * i.price), 0);
-    const orderData = { ...newOrder, totalAmount: subtotal, addedBy: selectedOperator, status: { ...newOrder.status, isProcessed: allProcessed }, updatedAt: Date.now() };
+    const orderData = { 
+      ...newOrder, 
+      totalAmount: subtotal, 
+      addedBy: selectedOperator, 
+      status: { ...newOrder.status, isProcessed: allProcessed }, 
+      updatedAt: Date.now() 
+    };
+
     try {
-      if (editingOrderId) { await updateDoc(doc(db, 'orders', editingOrderId), orderData); } 
-      else { await addDoc(collection(db, 'orders'), { ...orderData, createdAt: Date.now(), isArchived: false, isDeleted: false }); }
+      if (editingOrderId) { 
+        await updateDoc(doc(db, 'orders', editingOrderId), orderData); 
+      } else { 
+        await addDoc(collection(db, 'orders'), { ...orderData, createdAt: Date.now(), isArchived: false, isDeleted: false }); 
+      }
       setIsModalOpen(false);
+      setToastMessage('✅ 訂單已儲存');
+      setTimeout(() => setToastMessage(null), 3000);
     } catch (e) { alert("儲存失敗"); }
   };
 
-  // Pricing Logic
-  const suggestedPrice = useMemo(() => {
-    const cost = calcForm.foreignPrice * calcForm.rate;
-    return Math.ceil(cost * (1 + calcForm.margin / 100));
-  }, [calcForm.foreignPrice, calcForm.rate, calcForm.margin]);
-
-  const estimatedProfit = useMemo(() => {
-    const cost = calcForm.foreignPrice * calcForm.rate;
-    return Math.floor(calcForm.finalPrice - cost);
-  }, [calcForm.foreignPrice, calcForm.rate, calcForm.finalPrice]);
-
-  useEffect(() => {
-    if (currentActiveRate) {
-      setCalcForm(prev => ({ ...prev, rate: currentActiveRate.cash || currentActiveRate.visa }));
+  // Pricing helper for modal items
+  const updateItemPricing = (idx: number, field: string, value: any) => {
+    const items = [...(newOrder.items || [])];
+    const item = items[idx];
+    if (field === 'foreignPrice') {
+        item.purchases[0].foreignPrice = Number(value);
+    } else if (field === 'rate') {
+        item.purchases[0].rate = Number(value);
+    } else if (field === 'margin') {
+        // We use this to calculate suggested TWD price
+        const cost = item.purchases[0].rate > 0 ? item.purchases[0].foreignPrice / item.purchases[0].rate : 0;
+        item.price = Math.ceil(cost * (1 + Number(value) / 100));
     }
-  }, [currentActiveRate]);
+    item.cost = calculateItemCost(item.purchases);
+    setNewOrder({ ...newOrder, items });
+  };
 
   return (
     <div className="max-w-md mx-auto min-h-screen pb-32 bg-[#F8FAF9] text-slate-800 antialiased font-sans">
@@ -374,20 +394,26 @@ const App: React.FC = () => {
             {filteredOrders.map(order => (
               <div key={order.id} onClick={() => openEditOrderModal(order)} className="bg-white rounded-[28px] p-5 shadow-sm border border-slate-100 space-y-4 active:scale-[0.98] transition-all cursor-pointer">
                 <div className="flex justify-between items-start">
-                  <div className="space-y-1.5"><div className="flex gap-2"><span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${order.category === '免運' ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-500'}`}>{order.category}</span><span className="text-[9px] font-black bg-orange-50 text-orange-600 px-2 py-0.5 rounded-full">{order.deliveryMethod}</span></div><h3 className="text-lg font-black flex items-center gap-2"><User size={14} className="text-slate-300" /> {order.customer}</h3></div>
-                  <div className="text-right flex flex-col items-end">
-                    <p className="text-[9px] text-slate-400 font-bold uppercase mb-0.5">{new Date(order.createdAt).toLocaleDateString()}</p>
+                  <div className="space-y-1.5">
+                    <div className="flex gap-2">
+                        <span className={`text-[9px] font-black px-2 py-0.5 rounded-full ${order.category === '免運' ? 'bg-green-100 text-green-600' : 'bg-slate-100 text-slate-500'}`}>{order.category}</span>
+                        <span className="text-[9px] font-black bg-orange-50 text-orange-600 px-2 py-0.5 rounded-full">{order.deliveryMethod}</span>
+                    </div>
+                    <h3 className="text-lg font-black flex items-center gap-2"><User size={14} className="text-slate-300" /> {order.customer}</h3>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] text-slate-400 font-bold uppercase mb-0.5">{new Date(order.createdAt).toLocaleDateString()}</p>
                     <p className="text-xl font-black text-slate-900 tracking-tighter">NT${(order.totalAmount + (order.shippingFee || 0)).toLocaleString()}</p>
                   </div>
                 </div>
                 <div className="flex gap-2">
-                  <button onClick={(e) => toggleOrderStatus(e, order.id, 'isPaid')} className={`flex-1 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center justify-center gap-1 ${order.status.isPaid ? 'bg-orange-500 text-white border-orange-500' : 'bg-transparent text-slate-400 border-slate-200'}`}>{order.status.isPaid ? <CheckCircle2 size={12}/> : <Circle size={12}/>} 已付款</button>
+                  <button onClick={(e) => toggleOrderStatus(e, order.id, 'isPaid')} className={`flex-1 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center justify-center gap-1 ${order.status.isPaid ? 'bg-orange-500 text-white border-orange-500' : 'bg-transparent text-slate-400 border-slate-200'}`}>{order.status.isPaid ? <CheckCircle2 size={12}/> : <Check size={12}/>} 已付款</button>
                   <button onClick={(e) => toggleOrderStatus(e, order.id, 'isProcessed')} className={`flex-1 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center justify-center gap-1 ${order.status.isProcessed ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-transparent text-slate-400 border-slate-200'}`}>{order.status.isProcessed ? <CheckCircle2 size={12}/> : <Circle size={12}/>} 已處理</button>
                   <button onClick={(e) => toggleOrderStatus(e, order.id, 'isShipped')} className={`flex-1 py-2 rounded-xl text-[10px] font-black border transition-all flex items-center justify-center gap-1 ${order.status.isShipped ? 'bg-[#3EB075] text-white border-[#3EB075]' : 'bg-transparent text-slate-400 border-slate-200'}`}>{order.status.isShipped ? <CheckCircle2 size={12}/> : <Circle size={12}/>} 已出貨</button>
                 </div>
                 <div className="bg-slate-50 rounded-2xl p-3 flex justify-between items-center text-xs font-bold text-slate-600">
                   <p className="truncate flex-1">{order.items.map(i => `${i.name}x${i.qty}`).join(', ')}</p>
-                  <button onClick={(e) => { e.stopPropagation(); updateDoc(doc(db, 'orders', order.id), { isArchived: true }); }} className="p-2 text-slate-300 hover:text-red-500"><Trash2 size={16} /></button>
+                  <button onClick={(e) => { e.stopPropagation(); updateDoc(doc(db, 'orders', order.id), { isArchived: true }); setToastMessage('🗑️ 已移至回收桶'); setTimeout(() => setToastMessage(null), 2000); }} className="p-2 text-slate-300 hover:text-red-500"><Trash2 size={16} /></button>
                 </div>
               </div>
             ))}
@@ -399,33 +425,6 @@ const App: React.FC = () => {
         <div className="p-4 space-y-6 animate-in fade-in duration-300">
           <div className="flex items-center gap-2"><Settings2 size={24} className="text-slate-900" /><h1 className="text-2xl font-black tracking-tighter italic uppercase">匯率與定價維護</h1></div>
           
-          <div className="bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 space-y-5">
-            <div className="flex items-center gap-2 text-indigo-600"><Calculator size={18}/><h4 className="text-[11px] font-black uppercase tracking-widest">專業定價試算工具</h4></div>
-            <div className="grid grid-cols-4 gap-2">
-              {(['JPY', 'KRW', 'USD', 'EUR'] as CurrencyType[]).map(c => (
-                <button key={c} onClick={() => setSelectedCurrency(c)} className={`py-2 rounded-xl text-[10px] font-black transition-all border ${selectedCurrency === c ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>{c}</button>
-              ))}
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block px-1">採購外幣金額</label><input type="number" value={calcForm.foreignPrice || ''} onChange={e => setCalcForm({...calcForm, foreignPrice: Number(e.target.value)})} className="w-full h-11 bg-slate-50 rounded-2xl px-4 font-black outline-none" placeholder="0.00" /></div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block px-1">採用匯率</label><input type="number" step="0.001" value={calcForm.rate || ''} onChange={e => setCalcForm({...calcForm, rate: Number(e.target.value)})} className="w-full h-11 bg-slate-50 rounded-2xl px-4 font-black outline-none" placeholder="0.000" /></div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block px-1">目標利潤 (%)</label><div className="relative"><input type="number" value={calcForm.margin} onChange={e => setCalcForm({...calcForm, margin: Number(e.target.value)})} className="w-full h-11 bg-slate-50 rounded-2xl px-4 font-black outline-none" /><Percent size={14} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-300" /></div></div>
-              <div className="space-y-1"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block px-1">建議售價 (TWD)</label><div className="w-full h-11 bg-slate-100 rounded-2xl px-4 flex items-center font-black text-slate-400 italic">NT$ {suggestedPrice.toLocaleString()}</div></div>
-            </div>
-            <div className="pt-2 border-t border-slate-50">
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-1 px-1">最終定價 (與產品庫同步)</label>
-              <div className="flex gap-3">
-                <input type="number" value={calcForm.finalPrice || ''} onChange={e => setCalcForm({...calcForm, finalPrice: Number(e.target.value)})} className="flex-1 h-12 bg-indigo-50 border border-indigo-100 rounded-2xl px-4 font-black text-indigo-600 outline-none" placeholder="輸入最終售價" />
-                <div className="bg-slate-900 rounded-2xl px-4 flex flex-col justify-center items-center text-white min-w-[80px]">
-                  <p className="text-[8px] font-black uppercase opacity-50">預估淨利</p>
-                  <p className="text-xs font-black text-green-400">NT${estimatedProfit.toLocaleString()}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div className="bg-white rounded-[32px] p-6 shadow-sm border border-slate-100 space-y-4">
             <div className="flex items-center gap-2 text-slate-900"><ArrowRightLeft size={18}/><h4 className="text-[11px] font-black uppercase tracking-widest">匯率數值維護</h4></div>
             <div className="grid grid-cols-2 gap-3">
@@ -455,35 +454,82 @@ const App: React.FC = () => {
 
       {activeTab === 'bookkeeping' && (
         <div className="p-4 space-y-4 animate-in fade-in duration-300">
-           <div className="flex items-center justify-between"><div className="flex items-center gap-2"><Cherry size={24} className="text-[#FF4D6D]" /><h1 className="text-2xl font-black tracking-tighter italic uppercase">採購利潤分析</h1></div><button onClick={() => { setProductForm({ id: '', name: '', suggestedPrice: 0 }); setIsProductModalOpen(true); }} className="text-[10px] font-black text-[#3EB075] px-3 py-1.5 bg-[#E4F7ED] rounded-xl flex items-center gap-1"><Plus size={14} /> 新增產品庫</button></div>
+           <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2"><Cherry size={24} className="text-[#FF4D6D]" /><h1 className="text-2xl font-black tracking-tighter italic uppercase">採購利潤分析</h1></div>
+              <button onClick={() => { setProductForm({ id: '', name: '', suggestedPrice: 0 }); setIsProductModalOpen(true); }} className="text-[10px] font-black text-[#3EB075] px-3 py-1.5 bg-[#E4F7ED] rounded-xl flex items-center gap-1"><Plus size={14} /> 新增產品庫</button>
+           </div>
+           
            <section className="bg-slate-900 rounded-[32px] p-7 text-white shadow-2xl relative overflow-hidden">
              <div className="absolute top-[-20px] right-[-20px] opacity-10 rotate-12"><CreditCard size={200} /></div>
-             <div className="grid grid-cols-2 gap-4">
-               <div className="space-y-1"><p className="text-[10px] font-black opacity-50 tracking-[0.2em] uppercase">已入帳金額</p><h2 className="text-2xl font-black tracking-tighter">NT$ {receivedAmount.toLocaleString()}</h2></div>
+             <div className="grid grid-cols-2 gap-4 relative z-10">
                <div className="space-y-1"><p className="text-[10px] font-black opacity-50 tracking-[0.2em] uppercase">待入帳金額</p><h2 className="text-2xl font-black tracking-tighter text-orange-400">NT$ {pendingAmount.toLocaleString()}</h2></div>
+               <div className="space-y-1"><p className="text-[10px] font-black opacity-50 tracking-[0.2em] uppercase">今日匯率基準</p><h2 className="text-2xl font-black tracking-tighter text-indigo-400">{currentActiveRate?.cash || currentActiveRate?.visa || '--'}</h2></div>
              </div>
            </section>
+
            <div className="space-y-4">
               {productStats.map(([name, stat]) => {
                 const profit = stat.totalSellingPrice - stat.totalPurchasedCost;
                 return (
                   <div key={name} className="bg-white rounded-[24px] overflow-hidden shadow-sm border border-slate-100 transition-all">
                     <div onClick={() => setExpandedProduct(expandedProduct === name ? null : name)} className="p-5 flex justify-between items-center cursor-pointer active:bg-slate-50">
-                      <div className="space-y-1 flex-1 pr-4"><h5 className="font-black text-slate-900 text-base">{name}</h5><div className="flex gap-2"><p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">需求: {stat.totalQty} / 人數: {stat.buyers.size}</p><p className={`text-[10px] font-black uppercase tracking-widest ${profit >= 0 ? 'text-green-500' : 'text-red-500'}`}>動態淨利: NT${Math.round(profit).toLocaleString()}</p></div></div>
+                      <div className="space-y-3 flex-1 pr-4">
+                        <h5 className="font-black text-slate-900 text-base">{name}</h5>
+                        {/* Dashboard Style Financial Layout */}
+                        <div className="flex gap-2 w-full">
+                          <div className="flex-1 bg-slate-50 border border-slate-100 rounded-xl py-2 px-1 text-center">
+                            <p className="text-[7px] font-black text-slate-400 uppercase tracking-tighter mb-0.5">總成本</p>
+                            <p className="text-[10px] font-black text-slate-500 leading-none">NT${Math.round(stat.totalPurchasedCost).toLocaleString()}</p>
+                          </div>
+                          <div className="flex-1 bg-blue-50 border border-blue-100 rounded-xl py-2 px-1 text-center">
+                            <p className="text-[7px] font-black text-blue-400 uppercase tracking-tighter mb-0.5">總收益</p>
+                            <p className="text-[10px] font-black text-blue-600 leading-none">NT${Math.round(stat.totalSellingPrice).toLocaleString()}</p>
+                          </div>
+                          <div className={`flex-1 border rounded-xl py-2 px-1 text-center ${profit >= 0 ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
+                            <p className={`text-[7px] font-black uppercase tracking-tighter mb-0.5 ${profit >= 0 ? 'text-green-400' : 'text-red-400'}`}>總利潤</p>
+                            <p className={`text-[10px] font-black leading-none ${profit >= 0 ? 'text-green-600' : 'text-red-600'}`}>NT${Math.round(profit).toLocaleString()}</p>
+                          </div>
+                        </div>
+                      </div>
                       {expandedProduct === name ? <ChevronDown size={20} className="text-slate-300" /> : <ChevronRight size={20} className="text-slate-300" />}
                     </div>
                     {expandedProduct === name && (
                       <div className="bg-slate-50/50 border-t border-slate-50 p-4 space-y-3 animate-in slide-in-from-top-2 duration-300">
-                        {stat.orders.length === 0 && <p className="text-[10px] text-slate-400 font-bold italic text-center py-2">目前尚無相關訂單</p>}
-                        {stat.orders.map(o => (
-                          <div key={o.id} onClick={() => openEditOrderModal(o)} className="bg-white p-3 rounded-2xl flex justify-between items-center shadow-sm border border-slate-100 active:scale-95 transition-all cursor-pointer">
-                            <div className="flex items-center gap-3"><div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-black ${o.status.isProcessed ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>{o.customer.charAt(0)}</div><div><p className="text-xs font-black text-slate-900">{o.customer}</p><p className="text-[8px] text-slate-400 font-bold uppercase">{o.items.find(i => i.name === name)?.qty || 0} PCS</p></div></div>
-                            <div className="text-right flex flex-col items-end">
-                               <p className="text-[8px] text-slate-400 font-bold uppercase mb-0.5">{new Date(o.createdAt).toLocaleDateString()}</p>
-                               <p className="text-sm font-black text-slate-900">NT${(o.totalAmount + (o.shippingFee || 0)).toLocaleString()}</p>
-                            </div>
+                        {/* Detailed Reference Info at top of expanded section */}
+                        <div className="flex gap-4 mb-1">
+                          <div className="flex-1 bg-white p-2.5 rounded-2xl border border-slate-100 text-center shadow-sm">
+                            <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">總需求數量</p>
+                            <div className="flex items-center justify-center gap-1.5"><Package size={12} className="text-slate-300"/><p className="text-sm font-black text-slate-900">{stat.totalQty} PCS</p></div>
                           </div>
-                        ))}
+                          <div className="flex-1 bg-white p-2.5 rounded-2xl border border-slate-100 text-center shadow-sm">
+                            <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mb-1">訂購總人數</p>
+                            <div className="flex items-center justify-center gap-1.5"><Users size={12} className="text-slate-300"/><p className="text-sm font-black text-slate-900">{stat.buyers.size} 人</p></div>
+                          </div>
+                        </div>
+                        
+                        {stat.orders.length === 0 ? (
+                          <p className="text-[10px] text-slate-400 font-bold italic text-center py-2">目前尚無相關訂單</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {stat.orders.map(o => (
+                              <div key={o.id} onClick={() => openEditOrderModal(o)} className="bg-white p-3 rounded-2xl flex justify-between items-center shadow-sm border border-slate-100 active:scale-95 transition-all cursor-pointer">
+                                <div className="flex items-center gap-3">
+                                  <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-black ${o.status.isProcessed ? 'bg-indigo-100 text-indigo-600' : 'bg-slate-100 text-slate-400'}`}>
+                                    {o.customer.charAt(0)}
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-black text-slate-900">{o.customer}</p>
+                                    <p className="text-[8px] text-slate-400 font-bold uppercase">{o.items.find(i => i.name === name)?.qty || 0} PCS</p>
+                                  </div>
+                                </div>
+                                <div className="text-right flex flex-col items-end">
+                                   <p className="text-[8px] text-slate-400 font-bold uppercase mb-0.5">{new Date(o.createdAt).toLocaleDateString()}</p>
+                                   <p className="text-sm font-black text-slate-900">NT${(o.totalAmount + (o.shippingFee || 0)).toLocaleString()}</p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -502,8 +548,8 @@ const App: React.FC = () => {
                 <div key={order.id} className="bg-white rounded-[24px] p-4 shadow-sm border border-slate-100 space-y-3">
                   <div className="flex justify-between items-start"><div><h4 className="font-black text-slate-900">{order.customer}</h4><p className="text-[10px] text-slate-400 font-bold">{new Date(order.createdAt).toLocaleDateString()}</p></div><p className="font-black text-slate-900">NT${(order.totalAmount + (order.shippingFee || 0)).toLocaleString()}</p></div>
                   <div className="flex gap-2 pt-2">
-                    <button onClick={(e) => { e.stopPropagation(); updateDoc(doc(db, 'orders', order.id), { isArchived: false, isDeleted: false }); setToastMessage('✅ 訂單已還原'); setTimeout(() => setToastMessage(null), 3000); }} className="flex-1 h-10 bg-indigo-50 text-indigo-600 rounded-xl text-[11px] font-black flex items-center justify-center gap-2"><RotateCcw size={14} /> 還原</button>
-                    <button onClick={(e) => { e.stopPropagation(); if(window.confirm('確定永久刪除？')) deleteDoc(doc(db, 'orders', order.id)); }} className="flex-1 h-10 bg-red-50 text-red-500 rounded-xl text-[11px] font-black flex items-center justify-center gap-2"><Trash2 size={14} /> 永久刪除</button>
+                    <button onClick={async (e) => { e.stopPropagation(); await updateDoc(doc(db, 'orders', order.id), { isArchived: false, isDeleted: false }); setToastMessage('✅ 訂單已還原'); setTimeout(() => setToastMessage(null), 3000); }} className="flex-1 h-10 bg-indigo-50 text-indigo-600 rounded-xl text-[11px] font-black flex items-center justify-center gap-2"><RotateCcw size={14} /> 還原</button>
+                    <button onClick={async (e) => { e.stopPropagation(); if(window.confirm('確定永久刪除？')) await deleteDoc(doc(db, 'orders', order.id)); }} className="flex-1 h-10 bg-red-50 text-red-500 rounded-xl text-[11px] font-black flex items-center justify-center gap-2"><Trash2 size={14} /> 永久刪除</button>
                   </div>
                 </div>
               ))}
@@ -550,26 +596,57 @@ const App: React.FC = () => {
               <div className="flex gap-4"><div className="flex-[2] space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase block px-1 tracking-widest">買家姓名</label><input type="text" value={newOrder.customer} onChange={e => setNewOrder({...newOrder, customer: e.target.value})} placeholder="請輸入姓名" className="w-full h-12 bg-slate-50 rounded-2xl px-4 font-black outline-none" /></div><div className="flex-1 space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase block px-1 tracking-widest">分類</label><select value={newOrder.category} onChange={e => setNewOrder({...newOrder, category: e.target.value as Category})} className="w-full h-12 bg-slate-50 rounded-2xl px-4 font-black outline-none"><option value="一般">一般</option><option value="免運">免運</option></select></div></div>
               <div><label className="text-[10px] font-black text-slate-400 uppercase block mb-3 px-1 tracking-widest">寄送方式 (SHIPPING)</label><div className="flex flex-wrap gap-2">{(['面交', '郵寄', '賣貨便'] as DeliveryMethod[]).map(method => (<button key={method} onClick={() => setNewOrder({ ...newOrder, deliveryMethod: method })} className={`px-4 py-2.5 rounded-xl text-[11px] font-black transition-all border ${newOrder.deliveryMethod === method ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg scale-105' : 'bg-slate-50 text-slate-400 border-slate-100'}`}>{method}</button>))}</div></div>
               <div className="space-y-2"><label className="text-[10px] font-black text-slate-400 uppercase block px-1 tracking-widest">運費金額</label><div className="relative"><input type="number" value={newOrder.shippingFee || ''} disabled={newOrder.category === '免運'} onChange={e => setNewOrder({...newOrder, shippingFee: Number(e.target.value)})} placeholder="0" className="w-full h-12 bg-slate-50 rounded-2xl px-12 font-black outline-none disabled:opacity-50" /><DollarSign size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" /></div></div>
-              <div className="space-y-4"><div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">品項詳情</label><button onClick={() => { const ir = getRateForPayment(currentActiveRate, 'VISA'); setNewOrder(prev => ({...prev, items: [...(prev.items || []), { name: '', qty: 0, purchases: [{ qty: 0, rate: ir || 1, foreignPrice: 0, paymentType: 'VISA', date: currentActiveRate?.date || new Date().toISOString().split('T')[0] }], price: 0, cost: 0, paymentType: 'VISA' }]})); }} className="text-[10px] font-black text-[#3EB075] px-3 py-1.5 bg-[#E4F7ED] rounded-xl flex items-center gap-1"><Plus size={14} /> 新增品項</button></div>
+              <div className="space-y-4">
+                <div className="flex justify-between items-center"><label className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">品項詳情與定價工具</label><button onClick={() => { const ir = getRateForPayment(currentActiveRate, 'VISA'); setNewOrder(prev => ({...prev, items: [...(prev.items || []), { name: '', qty: 0, purchases: [{ qty: 0, rate: ir || 1, foreignPrice: 0, paymentType: 'VISA', date: currentActiveRate?.date || new Date().toISOString().split('T')[0] }], price: 0, cost: 0, paymentType: 'VISA' }]})); }} className="text-[10px] font-black text-[#3EB075] px-3 py-1.5 bg-[#E4F7ED] rounded-xl flex items-center gap-1"><Plus size={14} /> 新增品項</button></div>
                 {newOrder.items?.map((item, idx) => (
                   <div key={idx} className="bg-slate-50 p-5 rounded-[32px] space-y-4 border border-slate-100 shadow-inner">
                     <div className="flex items-center gap-3"><div className="flex-1 relative"><input type="text" value={item.name} onFocus={() => setFocusedItemIndex(idx)} onBlur={() => setTimeout(() => setFocusedItemIndex(null), 200)} onChange={e => { const items = [...(newOrder.items || [])]; items[idx].name = e.target.value; setNewOrder({...newOrder, items}); }} className="w-full h-10 bg-white rounded-xl px-4 font-bold outline-none border border-slate-100" placeholder="產品名稱" />{focusedItemIndex === idx && masterProducts.filter(p => p.name.toLowerCase().includes(item.name.toLowerCase())).length > 0 && <div className="absolute left-0 right-0 top-12 bg-white rounded-2xl shadow-2xl border border-slate-100 z-[200] max-h-40 overflow-y-auto">{masterProducts.filter(p => p.name.toLowerCase().includes(item.name.toLowerCase())).map(p => <button key={p.id} onMouseDown={() => handleSelectSuggestion(idx, p.name)} className="w-full text-left px-4 py-2 hover:bg-slate-50 text-xs font-bold border-b border-slate-50 last:border-none">{p.name}</button>)}</div>}</div><button onClick={() => { const items = newOrder.items?.filter((_, i) => i !== idx); setNewOrder({...newOrder, items}); }} className="p-2 text-red-400 hover:text-red-600"><Trash2 size={20}/></button></div>
-                    <div className="flex gap-2">{(['現金', 'VISA', 'JCB'] as PaymentType[]).map(t => (<button key={t} onClick={() => { const items = [...(newOrder.items || [])]; items[idx].paymentType = t; const r = getRateForPayment(currentActiveRate, t); if(items[idx].purchases.length > 0) { items[idx].purchases[0].rate = r || 1; items[idx].purchases[0].paymentType = t; } items[idx].cost = calculateItemCost(items[idx].purchases); setNewOrder({...newOrder, items}); }} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black border ${item.paymentType === t ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-400 border-slate-100'}`}>{t}</button>))}</div>
-                    <div className="grid grid-cols-2 gap-3"><div className="bg-white rounded-xl h-10 flex items-center px-2 gap-2 shadow-sm border border-slate-100"><button onClick={() => { const items = [...(newOrder.items || [])]; if(items[idx].qty > 0) items[idx].qty--; setNewOrder({...newOrder, items}); }}><MinusCircle size={18} className="text-slate-200"/></button><span className="flex-1 text-center font-black text-xs">{item.qty}</span><button onClick={() => { const items = [...(newOrder.items || [])]; items[idx].qty++; setNewOrder({...newOrder, items}); }}><PlusCircle size={18} className="text-slate-400"/></button></div><div className="bg-amber-50/50 rounded-xl h-10 flex items-center px-2 gap-2 border border-amber-100"><button onClick={() => handlePurchasedMinus(idx)}><MinusCircle size={18} className="text-amber-200"/></button><span className="flex-1 text-center font-black text-xs text-amber-600">{(item.purchases || []).reduce((s, p) => s + p.qty, 0)}</span><button onClick={() => handlePurchasedPlus(idx)}><PlusCircle size={18} className="text-amber-400"/></button></div></div>
-                    <div className="bg-slate-900 rounded-2xl p-3 flex justify-between items-center text-white"><div className="flex items-center gap-1.5"><History size={12} className="text-indigo-400" /><p className="text-[10px] font-bold opacity-90">{item.paymentType === '現金' ? '手動匯率' : `基準: ${getRateForPayment(currentActiveRate, item.paymentType) || '--'}`}</p></div><div className="text-right"><p className="text-[8px] opacity-40 font-black tracking-widest uppercase">總成本</p><p className="text-xs font-black text-green-400">NT$ {Math.round(item.cost || 0).toLocaleString()}</p></div></div>
-                    <div className="relative flex items-center h-10"><input type="number" value={item.price || ''} onChange={e => { const items = [...(newOrder.items || [])]; items[idx].price = Number(e.target.value); setNewOrder({...newOrder, items}); }} className="w-full h-full bg-white rounded-xl px-4 text-right font-black text-sm outline-none border border-slate-100" placeholder="銷售單價" /><DollarSign size={14} className="absolute left-4 text-slate-300" /></div>
+                    
+                    {/* Professional Pricing Integration for this Item */}
+                    <div className="bg-white/50 p-3 rounded-2xl space-y-2 border border-slate-100">
+                        <div className="grid grid-cols-2 gap-2">
+                            <div><label className="text-[8px] font-black text-slate-400 uppercase">外幣採購價</label><input type="number" value={item.purchases[0]?.foreignPrice || ''} onChange={e => updateItemPricing(idx, 'foreignPrice', e.target.value)} className="w-full h-8 bg-white border border-slate-100 rounded-lg px-2 text-xs font-black outline-none" placeholder="0.00" /></div>
+                            <div><label className="text-[8px] font-black text-slate-400 uppercase">採購匯率(TWD基準)</label><input type="number" step="0.001" value={item.purchases[0]?.rate || ''} onChange={e => updateItemPricing(idx, 'rate', e.target.value)} className="w-full h-8 bg-white border border-slate-100 rounded-lg px-2 text-xs font-black outline-none" placeholder="0.000" /></div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div><label className="text-[8px] font-black text-slate-400 uppercase">目標利潤 (%)</label><input type="number" placeholder="30" onChange={e => updateItemPricing(idx, 'margin', e.target.value)} className="w-full h-8 bg-white border border-slate-100 rounded-lg px-2 text-xs font-black outline-none" /></div>
+                            <div><label className="text-[8px] font-black text-slate-400 uppercase">試算成本 (TWD)</label><div className="h-8 flex items-center px-2 text-[10px] font-black text-green-600 bg-green-50 rounded-lg">NT${Math.round(item.cost || 0).toLocaleString()}</div></div>
+                        </div>
+                    </div>
+
+                    <div className="flex gap-2">{(['現金', 'VISA', 'JCB'] as PaymentType[]).map(t => (<button key={t} onClick={() => { const items = [...(newOrder.items || [])]; items[idx].paymentType = t; const r = getRateForPayment(currentActiveRate, t); if(items[idx].purchases.length > 0) { items[idx].purchases[0].paymentType = t; items[idx].purchases[0].rate = r || 1; } items[idx].cost = calculateItemCost(items[idx].purchases); setNewOrder({...newOrder, items}); }} className={`flex-1 py-1.5 rounded-lg text-[10px] font-black border ${item.paymentType === t ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-slate-400 border-slate-100'}`}>{t}</button>))}</div>
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="bg-white rounded-xl h-10 flex items-center px-2 gap-2 shadow-sm border border-slate-100">
+                            <button onClick={() => { const items = [...(newOrder.items || [])]; if(items[idx].qty > 0) items[idx].qty--; setNewOrder({...newOrder, items}); }}><MinusCircle size={18} className="text-slate-200"/></button>
+                            <span className="flex-1 text-center font-black text-xs">{item.qty}</span>
+                            <button onClick={() => { const items = [...(newOrder.items || [])]; items[idx].qty++; setNewOrder({...newOrder, items}); }}><PlusCircle size={18} className="text-slate-400"/></button>
+                        </div>
+                        <div className="bg-amber-50 rounded-xl h-10 flex items-center px-2 gap-2 border border-amber-100">
+                            <button onClick={() => handlePurchasedMinus(idx)}><MinusCircle size={18} className="text-amber-200"/></button>
+                            <span className="flex-1 text-center font-black text-xs text-amber-600">{(item.purchases || []).reduce((s, p) => s + p.qty, 0)}</span>
+                            <button onClick={() => handlePurchasedPlus(idx)}><PlusCircle size={18} className="text-amber-400"/></button>
+                        </div>
+                    </div>
+                    <div className="relative flex items-center h-10"><input type="number" value={item.price || ''} onChange={e => { const items = [...(newOrder.items || [])]; items[idx].price = Number(e.target.value); setNewOrder({...newOrder, items}); }} className="w-full h-full bg-white rounded-xl px-4 text-right font-black text-sm outline-none border border-slate-100" placeholder="最終銷售單價 (TWD)" /><DollarSign size={14} className="absolute left-4 text-slate-300" /></div>
                   </div>
-                ))}</div></div>
-            <div className="p-8 bg-slate-900 text-white flex justify-between items-center shadow-[0_-10px_60px_rgba(0,0,0,0.6)]"><div><p className="text-[10px] opacity-40 font-black uppercase tracking-[0.2em] mb-1">應收總額</p><h4 className="text-3xl font-black italic tracking-tighter">NT$ {((newOrder.items?.reduce((s, i) => s + (i.price * i.qty), 0) || 0) + (newOrder.shippingFee || 0)).toLocaleString()}</h4></div><button onClick={handleSaveOrder} className="bg-[#3EB075] px-10 py-4 rounded-3xl font-black text-sm shadow-xl active:scale-90 transition-all">儲存訂單</button></div>
+                ))}
+              </div>
+            </div>
+            <div className="p-8 bg-slate-900 text-white flex justify-between items-center shadow-[0_-10px_60px_rgba(0,0,0,0.6)]">
+                <div><p className="text-[10px] opacity-40 font-black uppercase tracking-[0.2em] mb-1">應收總額</p><h4 className="text-3xl font-black italic tracking-tighter">NT$ {((newOrder.items?.reduce((s, i) => s + (i.price * i.qty), 0) || 0) + (newOrder.shippingFee || 0)).toLocaleString()}</h4></div>
+                <button onClick={handleSaveOrder} className="bg-[#3EB075] px-10 py-4 rounded-3xl font-black text-sm shadow-xl active:scale-90 transition-all">儲存訂單</button>
+            </div>
           </div>
         </div>
       )}
 
-      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-2xl border-t border-slate-100 h-20 z-[100] safe-bottom shadow-xl"><div className="flex justify-around items-center h-full">
+      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-2xl border-t border-slate-100 h-20 z-[100] safe-bottom shadow-xl">
+        <div className="flex justify-around items-center h-full">
           <button onClick={() => setActiveTab('dashboard')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'dashboard' ? 'text-[#3EB075] scale-110 font-black' : 'text-slate-300'}`}><LayoutDashboard size={24} strokeWidth={activeTab === 'dashboard' ? 3 : 2} /><span className="text-[10px] uppercase tracking-widest font-black">訂單管理</span></button>
           <button onClick={() => setActiveTab('rates')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'rates' ? 'text-indigo-600 scale-110 font-black' : 'text-slate-300'}`}><Calculator size={24} strokeWidth={activeTab === 'rates' ? 3 : 2} /><span className="text-[10px] uppercase tracking-widest font-black">定價匯率</span></button>
           <button onClick={() => setActiveTab('bookkeeping')} className={`flex flex-col items-center gap-1.5 transition-all ${activeTab === 'bookkeeping' ? 'text-[#FF4D6D] scale-110 font-black' : 'text-slate-300'}`}><Cherry size={24} strokeWidth={activeTab === 'bookkeeping' ? 3 : 2} /><span className="text-[10px] uppercase tracking-widest font-black">利潤分析</span></button>
-        </div></nav>
+        </div>
+      </nav>
     </div>
   );
 };
