@@ -7,14 +7,14 @@
   "theme_color": "#3EB075",
   "icons": [
     {
-      "src": "/cherry-logo.png",
+      "src": "https://i.ibb.co/6cZPkdGJ/IMG-8680.jpg",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/jpeg"
     },
     {
-      "src": "/cherry-logo.png",
+      "src": "https://i.ibb.co/6cZPkdGJ/IMG-8680.jpg",
       "sizes": "512x512",
-      "type": "image/png"
+      "type": "image/jpeg"
     }
   ]
 }
