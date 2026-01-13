@@ -1,7 +1,8 @@
+
 export type Category = '一般' | '免運';
 export type DeliveryMethod = '未設定' | '面交' | '郵寄' | '賣貨便';
 export type PaymentType = '現金' | 'VISA' | 'JCB';
-export type CurrencyType = 'JPY' | 'KRW' | 'USD' | 'EUR' | 'TWD';
+export type CurrencyType = 'JPY' | 'KRW' | 'USD' | 'EUR' | 'TWD' | 'CNY';
 
 export interface ExchangeRate {
   id: string;
@@ -20,6 +21,7 @@ export interface PurchaseRecord {
   foreignPrice: number;
   paymentType: PaymentType;
   date: string;
+  currency?: CurrencyType;
 }
 
 export interface OrderItem {
@@ -27,6 +29,7 @@ export interface OrderItem {
   qty: number;
   price: number;
   cost: number;
+  estimatedShipping: number; // Added: Per unit international shipping cost in TWD
   paymentType: PaymentType;
   purchases: PurchaseRecord[];
 }
@@ -57,6 +60,7 @@ export interface MasterProduct {
   id: string;
   name: string;
   suggestedPrice: number;
+  estimatedShipping: number; // Added: Per unit international shipping cost in TWD
   createdAt: number;
 }
 
